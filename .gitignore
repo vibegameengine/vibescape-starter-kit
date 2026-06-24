@@ -1,0 +1,14 @@
+# Godot 4 import cache & editor state
+.godot/
+
+# Only present so the parent monorepo's editor skips this folder; not part of
+# the published template.
+.gdignore
+
+# Mono / .NET (unused, but harmless)
+.mono/
+data_*/
+
+# OS junk
+.DS_Store
+Thumbs.db

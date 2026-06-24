@@ -1,0 +1,20 @@
+; Engine configuration file.
+; VibeScape — AAA Environment Starter Kit.
+
+config_version=5
+
+[application]
+
+config/name="VibeScape — AAA Environment Starter Kit"
+config/description="Drop-in AAA-looking world for Godot 4 — sky, lighting, GI and volumetric clouds wired up over a greybox stage with a material showcase. Ready to build on."
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.3", "Forward Plus")
+config/icon="res://icon.svg"
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/game_environment/plugin.cfg", "res://addons/volumetric_clouds/plugin.cfg")
+
+[rendering]
+
+lights_and_shadows/directional_shadow/size=4096
