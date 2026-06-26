@@ -5,6 +5,7 @@
 [ext_resource type="Shader" path="res://grid_floor.gdshader" id="3"]
 [ext_resource type="Script" path="res://fly_camera.gd" id="4"]
 [ext_resource type="Texture2D" path="res://art/decals/floor_stain.png" id="5"]
+[ext_resource type="Script" path="res://addons/game_environment/cloud_layer.gd" id="6"]
 
 [sub_resource type="PlaneMesh" id="ground_mesh"]
 size = Vector2(240, 240)
@@ -93,7 +94,16 @@ auto_exposure_max_sensitivity = 640.0
 script = ExtResource("1")
 shadow_distance = 45.0
 
+[node name="CloudLayer" type="Node3D" parent="."]
+script = ExtResource("6")
+height = 5500.0
+density = 0.048
+coverage = 0.51
+brightness = 0.21
+wind_speed = 2.8
+
 [node name="VolumetricClouds" type="Node3D" parent="."]
+visible = false
 script = ExtResource("2")
 height = 3550.0
 cloudiness = 0.38

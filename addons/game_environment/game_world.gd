@@ -18,6 +18,12 @@ enum Preset { CUSTOM, SUNNY, OVERCAST, EVENING }
 ## Falloff model of the standard (non-volumetric) depth/height fog.
 enum FogType { EXPONENTIAL, DEPTH }
 
+# Volumetric clouds rendered as the sky (so they land in reflections + ambient and the
+# sun/fog apply natively). Cloud raymarch ported from clayjohn's MIT demo; see THIRDPARTY.
+const _CLOUD_SKY := preload("res://addons/game_environment/cloud_sky.gdshader")
+const _EARTH_RADIUS := 6000000.0
+const _MAX_CLOUD_LAYERS := 4
+
 # Full look recipe per preset (only the exposed knobs; static settings live in
 # _configure_environment).
 const PRESETS := {
@@ -102,10 +108,14 @@ const PRESETS := {
 @export_range(0.0, 2.0, 0.01) var saturation := 1.25
 @export_range(0.0, 2.0, 0.01) var contrast := 1.08
 
+# Clouds are NOT configured here — add CloudLayer nodes to the scene and this node finds
+# them. Settings live on each CloudLayer (so you can stack several at different heights).
+
 var _world_env: WorldEnvironment
 var _env: Environment
 var _sun: DirectionalLight3D
 var _applied_preset := Preset.CUSTOM
+var _cloud_sky_mat: ShaderMaterial
 
 
 func _enter_tree() -> void:
@@ -114,11 +124,28 @@ func _enter_tree() -> void:
 
 func _ready() -> void:
 	_build()
+	add_to_group(GROUP)  # so CloudLayer nodes can find us to request a refresh
 	_sync()
 	set_process(Engine.is_editor_hint())
 
 
 func _process(_delta: float) -> void:
+	_sync()
+
+
+## Group GameWorld registers in so CloudLayer nodes can reach it without a path.
+const GROUP := &"__game_world"
+
+
+## Re-scan the scene for CloudLayer nodes and rebuild the sky clouds. Call this at RUNTIME
+## after you add/remove a CloudLayer or change its settings from code (in the editor it
+## updates live). Adding/removing a CloudLayer node calls this for you.
+func refresh_clouds() -> void:
+	_sync_clouds()
+
+
+## Re-apply the whole environment (lighting + clouds) from the current property values.
+func refresh() -> void:
 	_sync()
 
 
@@ -182,6 +209,8 @@ func _sync() -> void:
 	_env.ssao_intensity = ssao_intensity
 	_env.adjustment_saturation = saturation
 	_env.adjustment_contrast = contrast
+
+	_sync_clouds()
 
 
 func _load_preset(p: int) -> void:
@@ -290,18 +319,124 @@ func _make_camera_attributes() -> CameraAttributesPractical:
 	return ca
 
 
-## The atmosphere — a plain gradient sky (the Unreal-like deep-blue zenith -> pale
-## Mie horizon). Clouds are NOT here; they are separate VolumetricClouds nodes that
-## render on top. This sky is always present.
+## The atmosphere — a gradient sky (deep-blue zenith -> pale Mie horizon) that can ALSO
+## raymarch volumetric clouds when [member clouds_enabled] is on. It's a real sky shader,
+## so clouds land in the radiance cubemap (reflections + ambient) and the sun/fog apply
+## natively — no overlay, no faking. With clouds off it's just the gradient.
 func _make_sky() -> Sky:
-	var mat := ProceduralSkyMaterial.new()
-	mat.sky_top_color = Color(0.07, 0.28, 0.72)
-	mat.sky_horizon_color = Color(0.84, 0.87, 0.91)
-	mat.sky_curve = 0.1
-	mat.sky_energy_multiplier = 1.0
-	mat.ground_horizon_color = Color(0.84, 0.87, 0.91)
-	mat.ground_bottom_color = Color(0.6, 0.62, 0.64)
-	mat.ground_curve = 0.02
+	_cloud_sky_mat = ShaderMaterial.new()
+	_cloud_sky_mat.shader = _CLOUD_SKY
+	_cloud_sky_mat.set_shader_parameter("perlworlnoise",
+		_noise3d(64, FastNoiseLite.TYPE_CELLULAR, 0.04, FastNoiseLite.FRACTAL_PING_PONG, 4))
+	_cloud_sky_mat.set_shader_parameter("worlnoise",
+		_noise3d(48, FastNoiseLite.TYPE_CELLULAR, 0.09, -1, 0))
+	_cloud_sky_mat.set_shader_parameter("weathermap", _noise2d(256, 0.012, 3))
 	var sky := Sky.new()
-	sky.sky_material = mat
+	sky.sky_material = _cloud_sky_mat
+	sky.radiance_size = Sky.RADIANCE_SIZE_128
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
 	return sky
+
+
+## Scan the scene for CloudLayer nodes and push them (sorted highest-first) + the sun into
+## the sky shader. No layers = plain gradient sky.
+func _sync_clouds() -> void:
+	if _cloud_sky_mat == null:
+		return
+	var layers := _collect_cloud_layers()
+	layers.sort_custom(func(a: CloudLayer, b: CloudLayer) -> bool: return a.height > b.height)
+	var n: int = mini(layers.size(), _MAX_CLOUD_LAYERS)
+
+	# The sun comes from the key DirectionalLight via the sky shader's built-in LIGHT0_*, so
+	# nothing sun-related is fed here.
+	var b_rad := PackedFloat32Array()
+	var t_rad := PackedFloat32Array()
+	var cov := PackedFloat32Array()
+	var den := PackedFloat32Array()
+	var bri := PackedFloat32Array()
+	var wind := PackedVector2Array()
+	var wspd := PackedFloat32Array()
+	var turb := PackedFloat32Array()
+	var spr := PackedFloat32Array()
+	for i in _MAX_CLOUD_LAYERS:
+		if i < n:
+			var l: CloudLayer = layers[i]
+			var b := _EARTH_RADIUS + l.height
+			b_rad.append(b)
+			t_rad.append(b + l.thickness)
+			cov.append(l.coverage)
+			den.append(l.density)
+			bri.append(l.brightness)
+			wind.append(l.wind_direction)
+			wspd.append(l.wind_speed)
+			turb.append(l.turbulence_speed)
+			spr.append(l.sun_spread)
+		else:
+			b_rad.append(_EARTH_RADIUS + 1000.0)
+			t_rad.append(_EARTH_RADIUS + 3500.0)
+			cov.append(0.4); den.append(0.05); bri.append(0.1)
+			wind.append(Vector2(1.0, 0.0)); wspd.append(1.0); turb.append(1.0); spr.append(0.5)
+
+	_cloud_sky_mat.set_shader_parameter("layer_count", n)
+	_cloud_sky_mat.set_shader_parameter("layer_b_radius", b_rad)
+	_cloud_sky_mat.set_shader_parameter("layer_t_radius", t_rad)
+	_cloud_sky_mat.set_shader_parameter("layer_coverage", cov)
+	_cloud_sky_mat.set_shader_parameter("layer_density", den)
+	_cloud_sky_mat.set_shader_parameter("layer_brightness", bri)
+	_cloud_sky_mat.set_shader_parameter("layer_wind", wind)
+	_cloud_sky_mat.set_shader_parameter("layer_wind_speed", wspd)
+	_cloud_sky_mat.set_shader_parameter("layer_turbulence", turb)
+	_cloud_sky_mat.set_shader_parameter("layer_spread", spr)
+
+
+## Find every CloudLayer node in the current scene (editor or running).
+func _collect_cloud_layers() -> Array[CloudLayer]:
+	var tree := get_tree()
+	if tree == null:
+		return []
+	var root: Node = tree.edited_scene_root if Engine.is_editor_hint() else tree.current_scene
+	if root == null:
+		root = owner
+	var out: Array[CloudLayer] = []
+	_gather_cloud_layers(root, out)
+	return out
+
+
+func _gather_cloud_layers(node: Node, out: Array[CloudLayer]) -> void:
+	if node == null:
+		return
+	# Hidden layers (eye icon off, or a hidden parent) are skipped — toggling visibility
+	# turns a deck on/off.
+	if node is CloudLayer and (node as CloudLayer).is_visible_in_tree():
+		out.append(node)
+	for c in node.get_children():
+		_gather_cloud_layers(c, out)
+
+
+func _noise3d(size: int, type: int, freq: float, fractal_type: int, octaves: int) -> NoiseTexture3D:
+	var fnl := FastNoiseLite.new()
+	fnl.noise_type = type
+	fnl.frequency = freq
+	if fractal_type >= 0:
+		fnl.fractal_type = fractal_type
+		fnl.fractal_octaves = octaves
+	var tex := NoiseTexture3D.new()
+	tex.width = size
+	tex.height = size
+	tex.depth = size
+	tex.seamless = true
+	tex.noise = fnl
+	return tex
+
+
+func _noise2d(size: int, freq: float, octaves: int) -> NoiseTexture2D:
+	var fnl := FastNoiseLite.new()
+	fnl.noise_type = FastNoiseLite.TYPE_PERLIN
+	fnl.frequency = freq
+	fnl.fractal_octaves = octaves
+	var tex := NoiseTexture2D.new()
+	tex.width = size
+	tex.height = size
+	tex.seamless = true
+	tex.noise = fnl
+	return tex
