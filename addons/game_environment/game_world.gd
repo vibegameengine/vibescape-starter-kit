@@ -18,6 +18,9 @@ enum Preset { CUSTOM, SUNNY, OVERCAST, EVENING }
 ## Falloff model of the standard (non-volumetric) depth/height fog.
 enum FogType { EXPONENTIAL, DEPTH }
 
+## Directional shadow-map resolution options, in pixels (the enum values ARE the sizes).
+enum ShadowResolution { SIZE_2048 = 2048, SIZE_4096 = 4096, SIZE_8192 = 8192, SIZE_16384 = 16384 }
+
 # Volumetric clouds rendered as the sky (so they land in reflections + ambient and the
 # sun/fog apply natively). Cloud raymarch ported from clayjohn's MIT demo; see THIRDPARTY.
 const _CLOUD_SKY := preload("res://addons/game_environment/cloud_sky.gdshader")
@@ -59,8 +62,9 @@ const PRESETS := {
 	},
 }
 
-## Picking a preset overwrites the knobs below; editing a knob afterwards keeps the
-## preset label but freely overrides it.
+## Picking a preset fills the knobs below. Editing any knob afterwards flips this back to
+## Custom (so what you see is exactly what gets saved and used at runtime — a named preset
+## is NOT re-applied at runtime).
 @export var preset := Preset.SUNNY
 
 @export_group("Sun")
@@ -76,7 +80,10 @@ const PRESETS := {
 ## shadow map texels are denser. A long range (for driving) spreads the texels thin
 ## and small geometry (stairs/ramps) gets self-shadow striping. Keep it to your
 ## scene's scale: small lab ~40, open driving ~120.
-@export_range(20.0, 400.0, 5.0) var shadow_distance := 60.0
+@export_range(20.0, 400.0, 5.0) var shadow_distance := 100.0
+## Directional shadow-map resolution. Higher = crisper shadows, especially over a long
+## shadow_distance, at more VRAM/GPU. Applies to the scene's directional shadow atlas.
+@export var shadow_resolution := ShadowResolution.SIZE_16384
 
 @export_group("Exposure & Ambient")
 @export_range(0.0, 4.0, 0.01) var exposure := 0.85
@@ -114,7 +121,8 @@ const PRESETS := {
 var _world_env: WorldEnvironment
 var _env: Environment
 var _sun: DirectionalLight3D
-var _applied_preset := Preset.CUSTOM
+var _applied_preset := Preset.SUNNY
+var _applied_shadow_res := -1
 var _cloud_sky_mat: ShaderMaterial
 
 
@@ -152,8 +160,7 @@ func refresh() -> void:
 ## Apply a full preset to the exposed knobs (used by the inspector buttons).
 func apply_preset(p: int) -> void:
 	preset = p
-	_load_preset(p)
-	_sync()
+	_sync()  # _sync sees preset changed and loads it
 
 
 func _build() -> void:
@@ -177,8 +184,20 @@ func _build() -> void:
 func _sync() -> void:
 	if _env == null or _sun == null:
 		return
-	if preset != _applied_preset and preset != Preset.CUSTOM:
-		_load_preset(preset)
+	if preset != _applied_preset:
+		# The dropdown value changed since last sync: load the newly-picked preset (Custom
+		# loads nothing). A preset is applied ONLY here, when you pick it — never silently
+		# re-applied over your edits at runtime.
+		if preset != Preset.CUSTOM:
+			_load_preset(preset)
+		_applied_preset = preset
+	elif preset != Preset.CUSTOM and not _knobs_match(preset):
+		# Same preset still selected but a knob was edited -> flip the label to Custom, so
+		# the dropdown stays honest and these exact values are what gets saved + used.
+		preset = Preset.CUSTOM
+		_applied_preset = Preset.CUSTOM
+		if Engine.is_editor_hint():
+			notify_property_list_changed()
 
 	_sun.rotation_degrees = Vector3(-sun_altitude, sun_azimuth, 0.0)
 	_sun.light_color = sun_color
@@ -189,7 +208,11 @@ func _sync() -> void:
 	# a typed-null hides from `== null`, so read via Variant and fall back to the default
 	# — the shadow range then still applies immediately, in-editor, without a reload.
 	var sd: Variant = shadow_distance
-	_sun.directional_shadow_max_distance = sd if sd != null else 60.0
+	_sun.directional_shadow_max_distance = sd if sd != null else 100.0
+	# Resize the directional shadow atlas (global) only when it actually changes.
+	if int(shadow_resolution) != _applied_shadow_res:
+		_applied_shadow_res = int(shadow_resolution)
+		RenderingServer.directional_shadow_atlas_set_size(_applied_shadow_res, false)
 
 	_env.tonemap_exposure = exposure
 	_env.ambient_light_energy = ambient_energy
@@ -235,6 +258,30 @@ func _load_preset(p: int) -> void:
 	fog_type = cfg.get("fog_type", fog_type)
 	saturation = cfg.saturation
 	contrast = cfg.contrast
+
+
+## True if the exposed knobs still equal preset [param p] (i.e. the user hasn't edited any).
+func _knobs_match(p: int) -> bool:
+	if not PRESETS.has(p):
+		return false
+	var c: Dictionary = PRESETS[p]
+	return (is_equal_approx(sun_altitude, c.sun_altitude)
+		and is_equal_approx(sun_azimuth, c.sun_azimuth)
+		and sun_color.is_equal_approx(c.sun_color)
+		and is_equal_approx(sun_energy, c.sun_energy)
+		and is_equal_approx(sun_angular, c.sun_angular)
+		and is_equal_approx(shadow_opacity, c.shadow_opacity)
+		and is_equal_approx(ambient_energy, c.ambient_energy)
+		and is_equal_approx(exposure, c.exposure)
+		and is_equal_approx(ssao_intensity, c.ssao_intensity)
+		and is_equal_approx(glow_intensity, c.glow_intensity)
+		and is_equal_approx(fog_density, c.fog_density)
+		and is_equal_approx(volumetric_fog_density, c.get("volumetric_fog_density", volumetric_fog_density))
+		and volumetric_fog_albedo.is_equal_approx(c.get("volumetric_fog_albedo", volumetric_fog_albedo))
+		and fog_light_color.is_equal_approx(c.get("fog_light_color", fog_light_color))
+		and int(fog_type) == int(c.get("fog_type", fog_type))
+		and is_equal_approx(saturation, c.saturation)
+		and is_equal_approx(contrast, c.contrast))
 
 
 # --- Static configuration (baked, not exposed) -------------------------------
